@@ -49,11 +49,7 @@ pub fn main() !void {
     var args = std.process.args();
     _ = args.skip();
     const command = args.next().?;
-    if (!std.mem.eql(u8, command, "watch")) {
-        try std.io.getStdErr().writer().print("Unknown or unimplemented command '{s}'\n", .{
-            command,
-        });
-    } else {
+    if (std.mem.eql(u8, command, "watch")) {
         var exit_flag = std.atomic.Atomic(bool).init(false);
         const thread = try std.Thread.spawn(.{}, watch, .{&exit_flag});
         var reader = std.io.getStdIn().reader();
@@ -73,7 +69,42 @@ pub fn main() !void {
         exit_flag.store(true, std.atomic.Ordering.SeqCst);
 
         thread.join();
+    } else if (std.mem.eql(u8, command, "mode")) {
+        const arg = args.next();
+        const mode = try get_power_mode();
+        var bufferWriter = std.io.bufferedWriter(std.io.getStdOut().writer());
+        var w = bufferWriter.writer();
+        if (arg == null) {
+            const readableMode = if (mode == 0xab) "gmode" else "normal";
+            try w.print("Current Power Mode: {s}\n", .{readableMode});
+        } else {
+            const set_mode_to = arg.?;
+            if (std.mem.eql(u8, set_mode_to, "gmode")) {
+                const result = try enable_gmode();
+                try w.print("Enabled Gmode {}\n", .{result});
+            } else {
+                const result = try disable_gmode();
+                try w.print("Disabled Gmode {}\n", .{result});
+            }
+        }
+
+        try bufferWriter.flush();
+    } else {
+        try print_usage();
     }
+}
+
+pub fn print_usage() !void {
+    var buffer = std.io.bufferedWriter(std.io.getStdOut().writer());
+    const w = buffer.writer();
+
+    try w.print("Usage: \n", .{});
+    try w.print("\tawc [COMMAND] [ARGUMENT] \n", .{});
+    try w.print("COMMANDS: \n", .{});
+    try w.print("\t mode [gmode | normal]       - switch to gmode or normal \n", .{});
+    try w.print("\t watch                       - watch sensors and control fans automatically, the configuration of the relation between temparature and fan boost can be updated in main.zig\n", .{});
+
+    try buffer.flush();
 }
 
 pub fn watch(exit_flag: *std.atomic.Atomic(bool)) anyerror!void {
@@ -184,6 +215,7 @@ fn run_main_command(cmd: u8, sub: u8, arg0: u8, arg1: u8) anyerror!i64 {
 pub fn run_command(cmd: []u8) anyerror!i64 {
     // std.debug.print("Running {s}\n", .{cmd});
     var file = try std.fs.openFileAbsolute(ACPI_CALL_PATH, .{ .mode = .read_write });
+    defer file.close();
     try file.writeAll(cmd);
     var buffer: [32]u8 = undefined;
     const bytesRead = try file.readAll(&buffer);
