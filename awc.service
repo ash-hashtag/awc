@@ -1,0 +1,13 @@
+[Unit]
+Description=Apache web server
+After=network.target
+Before=nextcloud-web.service
+
+[Service]
+ExecStart=/usr/bin/awc watch
+Type=notify
+Restart=always
+
+[Install]
+WantedBy=default.target
+RequiredBy=network.target

@@ -51,10 +51,22 @@ pub fn main() !void {
     _ = args.skip();
     const command = args.next().?;
     if (std.mem.eql(u8, command, "watch")) {
-        var exit_flag = std.atomic.Atomic(bool).init(false);
+        var exit_flag = std.atomic.Value(bool).init(false);
+        const option = args.next();
+        if (option == null) {
+            _ = try std.io.getStdOut().write("Watch in non interactive mode\n");
+            try watch(&exit_flag);
+            return;
+        }
+        const unwrappedOption = option.?;
+        if (!std.mem.eql(u8, unwrappedOption, "-i")) {
+            _ = try std.io.getStdOut().write("Watch in interactive mode\n");
+            try std.io.getStdErr().writer().print("Unknown option '{s}'\n", .{unwrappedOption});
+            return;
+        }
         const thread = try std.Thread.spawn(.{}, watch, .{&exit_flag});
-        var reader = std.io.getStdIn().reader();
         var buf: [32]u8 = undefined;
+        var reader = std.io.getStdIn().reader();
         while (try reader.readUntilDelimiterOrEof(&buf, '\n')) |line| {
             if (line.len == 0) {
                 continue;
@@ -67,7 +79,7 @@ pub fn main() !void {
         }
 
         try std.io.getStdOut().writer().print("Exiting gracefully\n", .{});
-        exit_flag.store(true, std.atomic.Ordering.SeqCst);
+        exit_flag.store(true, .seq_cst);
 
         thread.join();
     } else if (std.mem.eql(u8, command, "fans")) {
@@ -116,7 +128,7 @@ pub fn print_usage() !void {
     try w.print("\tawc [COMMAND] [ARGUMENT] \n", .{});
     try w.print("COMMANDS: \n", .{});
     try w.print("\t mode [gmode | normal | ]    - switch to gmode or normal, or prints current mode if no mode is passed \n", .{});
-    try w.print("\t watch                       - watch sensors and control fans automatically, the configuration of the relation between temparature and fan boost can be updated in main.zig\n", .{});
+    try w.print("\t watch [-i]                      - watch sensors and control fans automatically, -i option for interactive  the configuration of the relation between temparature and fan boost can be updated in main.zig\n", .{});
     try w.print("\t fans [boost | ]             - set all fan boosts, or prints current fan boosts, if no boost value passed\n", .{});
 
     try buffer.flush();
@@ -130,7 +142,7 @@ pub fn print_fan_info(fan_id: u8, w: anytype) anyerror!u8 {
     return boost;
 }
 
-pub fn watch(exit_flag: *std.atomic.Atomic(bool)) anyerror!void {
+pub fn watch(exit_flag: *std.atomic.Value(bool)) anyerror!void {
     const power_mode = try get_power_mode();
     var buf = std.io.bufferedWriter(std.io.getStdOut().writer());
     const w = buf.writer();
@@ -147,7 +159,7 @@ pub fn watch(exit_flag: *std.atomic.Atomic(bool)) anyerror!void {
         const start = try std.time.Instant.now();
         while (true) {
             std.time.sleep(20 * std.time.ns_per_ms);
-            if (exit_flag.load(std.atomic.Ordering.SeqCst)) {
+            if (exit_flag.load(.seq_cst)) {
                 try set_fan_boosts(0, &w);
                 try buf.flush();
                 return;
@@ -262,7 +274,7 @@ pub fn run_command(cmd: []u8) anyerror!i64 {
         result = buffer[0 .. bytesRead - 1];
     }
     // std.debug.print("\nresult of {s} '{s}', {} \n", .{ cmd, result, bytesRead });
-    var value = try std.fmt.parseInt(i64, result, 0);
+    const value = try std.fmt.parseInt(i64, result, 0);
 
     return value;
 }
