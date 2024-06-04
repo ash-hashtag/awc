@@ -17,16 +17,15 @@ const Coordinates = struct {
     y: u8,
 };
 
-const TempFanGraph: [8]Coordinates = .{
-    Coordinates{ .x = 0, .y = 0 },
-    Coordinates{ .x = 47, .y = 0 },
-    Coordinates{ .x = 48, .y = 38 },
-    Coordinates{ .x = 50, .y = 64 },
-    Coordinates{ .x = 55, .y = 100 },
-    Coordinates{ .x = 60, .y = 128 },
-    Coordinates{ .x = 65, .y = 130 },
-    Coordinates{ .x = 95, .y = 150 },
-};
+// const TempFanGraph: [7]Coordinates = .{
+//     Coordinates{ .x = 0, .y = 0 },
+//     Coordinates{ .x = 50, .y = 0 },
+//     Coordinates{ .x = 51, .y = 50 },
+//     Coordinates{ .x = 55, .y = 100 },
+//     Coordinates{ .x = 60, .y = 128 },
+//     Coordinates{ .x = 65, .y = 130 },
+//     Coordinates{ .x = 95, .y = 150 },
+// };
 
 const AlienDevInfo = struct {
     fan_id: u8,
@@ -46,16 +45,71 @@ const GPU_ALIEN_DEVICE: AlienDevInfo = AlienDevInfo{
     .name = "GPU",
 };
 
+const NoOpWriter = struct {
+    pub fn write(self: *NoOpWriter, bytes: []const u8) !usize {
+        _ = self;
+        return bytes.len;
+    }
+
+    pub fn writeAll(self: *NoOpWriter, bytes: []const u8) !void {
+        // Simply discard all bytes
+        _ = self.write(bytes);
+    }
+};
+
+pub fn loadConfig(allocator: std.mem.Allocator, file_path: []const u8) !std.ArrayList(Coordinates) {
+    var temp_fan_graph = std.ArrayList(Coordinates).init(allocator);
+    const f = try std.fs.cwd().openFile(file_path, .{});
+    defer f.close();
+    while (try f.reader().readUntilDelimiterOrEofAlloc(allocator, '\n', 4096)) |line| {
+        defer allocator.free(line);
+        std.debug.print("{s}\n", .{line});
+        if (line.len > 0) {
+            var iter = std.mem.splitScalar(u8, line, ' ');
+            var temp: ?u8 = null;
+            var boost: ?u8 = null;
+            while (iter.next()) |part| {
+                if (part.len > 0) {
+                    const part_int = try std.fmt.parseInt(u8, part, 10);
+                    if (temp == null) {
+                        const last_temp = temp_fan_graph.getLastOrNull();
+                        if (last_temp != null and last_temp.?.x > part_int) {
+                            break;
+                        }
+                        temp = part_int;
+                    } else if (boost == null) {
+                        boost = part_int;
+                        try temp_fan_graph.append(.{ .x = temp.?, .y = boost.? });
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    return temp_fan_graph;
+}
+
 pub fn main() !void {
     var args = std.process.args();
     _ = args.skip();
     const command = args.next().?;
+
     if (std.mem.eql(u8, command, "watch")) {
+        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        defer {
+            _ = gpa.deinit();
+        }
+        const allocator = gpa.allocator();
+        const config_path = try std.process.getEnvVarOwned(allocator, "CONFIG");
+        const temp_fan_graph = try loadConfig(allocator, config_path);
+        allocator.free(config_path);
+        defer temp_fan_graph.deinit();
+        const temp_fan_graph_as_array = temp_fan_graph.items.ptr[0..temp_fan_graph.items.len];
         var exit_flag = std.atomic.Value(bool).init(false);
         const option = args.next();
         if (option == null) {
             _ = try std.io.getStdOut().write("Watch in non interactive mode\n");
-            try watch(&exit_flag);
+            try watch(&exit_flag, temp_fan_graph_as_array);
             return;
         }
         const unwrappedOption = option.?;
@@ -64,7 +118,7 @@ pub fn main() !void {
             try std.io.getStdErr().writer().print("Unknown option '{s}'\n", .{unwrappedOption});
             return;
         }
-        const thread = try std.Thread.spawn(.{}, watch, .{&exit_flag});
+        const thread = try std.Thread.spawn(.{}, watch, .{ &exit_flag, temp_fan_graph_as_array });
         var buf: [32]u8 = undefined;
         var reader = std.io.getStdIn().reader();
         while (try reader.readUntilDelimiterOrEof(&buf, '\n')) |line| {
@@ -115,6 +169,16 @@ pub fn main() !void {
         }
 
         try bufferWriter.flush();
+    } else if (std.mem.eql(u8, command, "temps")) {
+        var bufferWriter = std.io.bufferedWriter(std.io.getStdOut().writer());
+        const w = bufferWriter.writer();
+        var device = CPU_ALIEN_DEVICE;
+        var temp = try get_temperature(device.sen_id);
+        try w.print("Sensor {s} Temperature: {d}\n", .{ device.name, temp });
+        device = GPU_ALIEN_DEVICE;
+        temp = try get_temperature(device.sen_id);
+        try w.print("Sensor {s} Temperature: {d}\n", .{ device.name, temp });
+        try bufferWriter.flush();
     } else {
         try print_usage();
     }
@@ -130,6 +194,7 @@ pub fn print_usage() !void {
     try w.print("\t mode [gmode | normal | ]    - switch to gmode or normal, or prints current mode if no mode is passed \n", .{});
     try w.print("\t watch [-i]                      - watch sensors and control fans automatically, -i option for interactive  the configuration of the relation between temparature and fan boost can be updated in main.zig\n", .{});
     try w.print("\t fans [boost | ]             - set all fan boosts, or prints current fan boosts, if no boost value passed\n", .{});
+    try w.print("\t temps             - prints temps info\n", .{});
 
     try buffer.flush();
 }
@@ -142,7 +207,7 @@ pub fn print_fan_info(fan_id: u8, w: anytype) anyerror!u8 {
     return boost;
 }
 
-pub fn watch(exit_flag: *std.atomic.Value(bool)) anyerror!void {
+pub fn watch(exit_flag: *std.atomic.Value(bool), temp_fan_graph: []const Coordinates) anyerror!void {
     const power_mode = try get_power_mode();
     var buf = std.io.bufferedWriter(std.io.getStdOut().writer());
     const w = buf.writer();
@@ -152,8 +217,8 @@ pub fn watch(exit_flag: *std.atomic.Value(bool)) anyerror!void {
     }
     try w.print("Watching Temperatures...\n", .{});
     while (true) {
-        _ = try update_device(&CPU_ALIEN_DEVICE, &w);
-        _ = try update_device(&GPU_ALIEN_DEVICE, &w);
+        _ = try update_device(&CPU_ALIEN_DEVICE, temp_fan_graph, &w);
+        _ = try update_device(&GPU_ALIEN_DEVICE, temp_fan_graph, &w);
         try w.print("\n", .{});
         try buf.flush();
         const start = try std.time.Instant.now();
@@ -189,31 +254,18 @@ fn set_fan_boosts(boost: u8, writer: anytype) anyerror!void {
     try set_fan_boost_and_print(GPU_ALIEN_DEVICE.fan_id, boost, writer);
 }
 
-fn update_device(device: *const AlienDevInfo, writer: anytype) anyerror!void {
+fn update_device(device: *const AlienDevInfo, temp_fan_graph: []const Coordinates, writer: anytype) anyerror!void {
     const w = writer;
     const temp = try get_temperature(device.sen_id);
     const timestamp = std.time.milliTimestamp();
     try w.print("{} Device {s}\n", .{ timestamp, device.name });
     try w.print("\tSensor Temperature: {}\n", .{temp});
-    for (TempFanGraph) |coord| {
+    for (temp_fan_graph) |coord| {
         if (temp < coord.x) {
             const fan_boost = coord.y;
             const current_fan_boost = try print_fan_info(device.fan_id, w);
-            // const current_fan_boost = try get_fan_boost(device.fan_id);
-            // const current_fan_rpm = try get_fan_rpm(device.fan_id);
-            // try w.print("\tBoost {s}{}{s}\n", .{ YELLOW, current_fan_boost, RESET });
-            // try w.print("\tRPM   {s}{}{s}\n", .{ GREEN, current_fan_rpm, RESET });
             if (current_fan_boost != fan_boost) {
                 try set_fan_boost_and_print(device.fan_id, fan_boost, w);
-                // const result = try set_fan_boost(device.fan_id, fan_boost);
-                // try w.print("\tSet Fan Boost To {s}{}{s} result {s}{}{s}\n", .{
-                //     BOLD,
-                //     fan_boost,
-                //     RESET,
-                //     CYAN,
-                //     result,
-                //     RESET,
-                // });
             }
             break;
         }
@@ -263,7 +315,6 @@ fn run_main_command(cmd: u8, sub: u8, arg0: u8, arg1: u8) anyerror!i64 {
 }
 
 pub fn run_command(cmd: []u8) anyerror!i64 {
-    // std.debug.print("Running {s}\n", .{cmd});
     var file = try std.fs.openFileAbsolute(ACPI_CALL_PATH, .{ .mode = .read_write });
     defer file.close();
     try file.writeAll(cmd);
@@ -273,9 +324,7 @@ pub fn run_command(cmd: []u8) anyerror!i64 {
     if (buffer[bytesRead - 1] == 0) {
         result = buffer[0 .. bytesRead - 1];
     }
-    // std.debug.print("\nresult of {s} '{s}', {} \n", .{ cmd, result, bytesRead });
     const value = try std.fmt.parseInt(i64, result, 0);
-
     return value;
 }
 
