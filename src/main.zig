@@ -17,16 +17,6 @@ const Coordinates = struct {
     y: u8,
 };
 
-// const TempFanGraph: [7]Coordinates = .{
-//     Coordinates{ .x = 0, .y = 0 },
-//     Coordinates{ .x = 50, .y = 0 },
-//     Coordinates{ .x = 51, .y = 50 },
-//     Coordinates{ .x = 55, .y = 100 },
-//     Coordinates{ .x = 60, .y = 128 },
-//     Coordinates{ .x = 65, .y = 130 },
-//     Coordinates{ .x = 95, .y = 150 },
-// };
-
 const AlienDevInfo = struct {
     fan_id: u8,
     sen_id: u8,
